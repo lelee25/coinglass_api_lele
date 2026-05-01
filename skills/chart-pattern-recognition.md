@@ -370,3 +370,31 @@ Pattern di inversione come segnali di timing assoluto:
   Dice che la pressione rialzista si sta esaurendo in quel punto.
   Il trend puo continuare ancora 2-3 candele prima dell'inversione.
 ```
+
+---
+
+## Cross-reference con le altre skill
+
+```
+CHIAMATA DA:
+  scalp-execution        (per conferma pattern visivo del setup)
+  gex-analysis           (PASSO 2 lettura tecnica integrata)
+  derivatives-dashboard  (interpretazione candle in zona DIVERGENCE)
+
+CARICA REFERENCE (relative path, dentro skills/references/):
+  references/candlestick-patterns.md       (1-3 candele)
+  references/chart-patterns.md             (geometria multi-candela)
+  references/harmonic-patterns.md          (XABCD Fibonacci ratios)
+  references/fibonacci-analysis.md         (livelli, extension, S/R)
+  references/stochrsi-volume-integration.md (SEMPRE — filtro qualità)
+
+LETTA DA QUESTA SKILL (modifier contestuale):
+  context.macro_regime          <- pattern bullish in EUPHORIA = edge ridotto
+  calibration.asset_thresholds  <- references/calibration-thresholds.md
+                                    (StochRSI 75/25 -> p85/p15 calibrati)
+
+NOTA: i pattern hanno affidabilità storica documentata nella tabella.
+      Quei valori (es. H&S 76%, Bull Flag >80%) sono medi storici da
+      letteratura, NON calibrati per asset specifico — usali come ordine
+      di grandezza, non come probabilità esatta del trade.
+```

@@ -371,3 +371,40 @@ SETUP  | CONTESTO  | DIREZIONE        | SEGNALE CHIAVE          | DURATA
   6    | Qualsiasi | Contro divergenza| Div. StochRSI su livello| 3-10 c.
        |           |                  | GEX str > 6.5           |
 ```
+
+---
+
+## Cross-reference con le altre skill
+
+```
+LETTA DA QUESTA SKILL (modifier che cambiano edge e setups disponibili):
+  context.macro_regime          <- macro-regime-monitor (modifiers_for_other_skills)
+                                    -> setups_blocked: array dei setup non permessi
+                                    -> long_w / short_w: peso edge
+                                    -> swing_allowed: se NO, max scalp esteso 1h
+  context.funding_costs         <- funding-arb-detector (filtro costo trade)
+  context.funding_signal        <- funding-arb-detector (contrarian boost o penalty)
+  scratchpad.whale_alerts       <- whale-onchain-monitor (boost edge se aligned)
+  context.etf_signal            <- etf-flow-interpreter (bias settimanale modifier)
+  calibration.asset_thresholds  <- references/calibration-thresholds.md
+                                    -> StochRSI 75/25 -> p85/p15 calibrati
+                                    -> Bollinger 0.5% -> p10 bandwidth calibrato
+                                    -> Volume 2x -> p90 volume_ratio_1h calibrato
+
+CHIAMATA DA:
+  gex-analysis (cascata SWING NO -> STEP B SCALP CHECK)
+  price-alert-trigger (SCALP CONDIZIONALE delegato qui)
+
+CHIAMA SUB-SKILL:
+  chart-pattern-recognition (per conferma pattern visivo del setup)
+  references/stochrsi-volume-integration (filtro StochRSI+Volume per ogni setup)
+
+FILTRO 7 — REGIME MACRO INCOMPATIBILE (nuovo):
+  Leggi context.macro_regime.modifiers_for_other_skills.setups_blocked
+  Se setup_id e nella lista bloccata per il regime corrente -> SKIP
+  Es. EUPHORIA blocca Setup 4 (breakout long); RISK-OFF blocca 4 e 6.
+
+FILTRO 8 — WHALE ALERT CONTRARIAN (nuovo):
+  Se scratchpad.whale_alerts contiene level=HIGH bearish per BTC
+  e setup è long su BTC -> require 4+ confluenze invece di 2-3.
+```

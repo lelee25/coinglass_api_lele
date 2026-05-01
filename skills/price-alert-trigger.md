@@ -356,3 +356,37 @@ ALERT SCATTATO DURANTE SESSIONE CON LOSS GIA REALIZZATA:
 [ ] Orario / evento macro / posizioni aperte? (context.json)
 -> Score e decisione in < 60 secondi
 ```
+
+---
+
+## Cross-reference con le altre skill
+
+```
+LETTA DA QUESTA SKILL (lettura contestuale veloce, < 60s):
+  context.macro_regime          <- macro-regime-monitor (size_factor, stop_min)
+  context.funding_costs         <- funding-arb-detector (cost-aware del trade attuale)
+  context.funding_signal        <- funding-arb-detector (signal contrarian)
+  scratchpad.whale_alerts       <- whale-onchain-monitor (downgrade trade vs whale)
+  context.etf_signal            <- etf-flow-interpreter (bias strategico, modifier)
+  calibration.asset_thresholds  <- references/calibration-thresholds.md (str P85/P95)
+
+  CHECKLIST ESTESA (8 check invece di 5 — rapidi, lookup-only):
+    [ ] str > P85 calibrato? (era str > 7.0 hardcoded)
+    [ ] LW trend allineato?
+    [ ] OI non in calo?
+    [ ] LW diff non mostra struttura ceduta?
+    [ ] Anti-tilt: loss recente?
+    [ ] macro_regime allow trade in questa direzione? (NEW)
+    [ ] Whale alert HIGH contrarian alla direzione? (NEW — se SI, downgrade)
+    [ ] Funding cost accettabile per timeframe atteso? (NEW)
+
+DELEGA A:
+  scalp-execution (se SCALP CONDIZIONALE -> valutazione tecnica dettagliata)
+  gex-analysis (in caso di INVALIDAZIONE strutturale)
+  derivatives-dashboard (lettura veloce 4 pannelli — solo se score 3/8)
+
+SCRIVE:
+  scratchpad.last_decision (decisione + by_agent + ts)
+  scratchpad.notes (entry sintetica)
+  active_positions (se TRADE eseguito)
+```

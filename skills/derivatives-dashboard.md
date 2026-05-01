@@ -486,3 +486,32 @@ DIVERGENZA OI COME EARLY WARNING:
   -> Divergenza + L/S estremo + liquidazioni che cambiano = entry signal
   -> Divergenza da sola = non ancora, aspetta conferma degli altri pannelli
 ```
+
+---
+
+## Cross-reference con le altre skill
+
+```
+LETTA DA QUESTA SKILL (input contestuale):
+  context.macro_regime          <- macro-regime-monitor (pesa il bias composito)
+  context.funding_signal        <- funding-arb-detector (arricchisce P2 quando attivo)
+  context.etf_signal            <- etf-flow-interpreter (modifier strategico)
+  scratchpad.whale_alerts       <- whale-onchain-monitor (conferma divergenze P1)
+  calibration.asset_thresholds  <- references/calibration-thresholds.md
+
+  Sovrascrivere le soglie hardcoded:
+    L/S "extreme" hardcoded > 2.0  ->  cal.ls_ratio.p95
+    OI "forte crescita" > +2%/h    ->  cal.oi_delta_1h_pct.p95
+    Liquidations "outlier"         ->  cal.liquidations_daily_usd.p99
+
+CHIAMATA DA:
+  gex-analysis (PASSO 0 — invece del blocco derivati minimale)
+  price-alert-trigger (lettura veloce derivati nella checklist)
+
+CHIAMA SUB-SKILL:
+  references/chart-reading.md per lettura visiva charts (VP, GEX Profile, Analysis)
+
+SCRIVE:
+  context.derivatives (snapshot 4 pannelli con bias composito)
+  retrospettive.md (entry quando segnale composito > 3/4 ma trade non eseguito)
+```

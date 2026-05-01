@@ -78,3 +78,93 @@ Il verdetto più onesto è questo: **la coppia CoinGecko + CoinGlass è davvero 
 Le due correzioni più importanti rispetto al tuo schema iniziale sono: **CoinGecko oggi ha WebSocket**, ma non nel tier gratuito né nel Basic; e **CoinGlass va trattato come API specializzata da segnali di mercato derivato**, non come sostituto di un catalogo market-cap globale. Sotto il profilo integrativo, la combinazione più sensata oggi è: **CoinGecko Demo/Basic/Analyst per l’universo e la discovery**, **CoinGlass Hobbyist/Startup per la conferma microstrutturale e derivata**. citeturn13view2turn13view1turn5view0turn11view0
 
 Le principali limitazioni rimaste aperte sono tre. Primo: **non ho recuperato un sitemap XML pubblico di CoinGlass docs**, quindi la copertura route per CoinGlass è ricostruita dall’albero docs ufficiale e dal repo ufficiale, non da un file sitemap. Secondo: la documentazione CoinGlass visibile nei risultati mostra **incoerenze minori di naming e pricing**, quindi in implementazione conviene testare i path direttamente sulle reference page endpoint. Terzo: per CoinGlass WebSocket sono visibili con certezza **le sezioni documentali e l’esempio di connessione**, ma non ho estratto dai risultati un catalogo completo dei payload/schema channel comparabile al dettaglio che CoinGecko espone per il proprio WebSocket Beta. citeturn44search1turn27search0turn5view0
+---
+
+## ERRATA / 2026-04-30 update
+
+> Patch redatta dopo validazione con 4 agenti Opus 4.7 che hanno consultato `docs.coingecko.com`, `coingecko.com/en/api/pricing`, `github.com/coingecko/*` e changelog ufficiali. Quanto segue corregge errori, aggiorna informazioni obsolete e dettaglia ciò che manca. Per la guida operativa Hobbyist completa vedere `INTEGRATION-NOTES.md`.
+
+### Errori fattuali da correggere
+
+- **Nomi canali WebSocket**: il documento elenca `CGSimplePriceC1`, `OnchainSimpleTokenPriceG1`, `OnchainTradeG2`, `OnchainOHLCVG3`. I **nomi reali da subscribe** sono `CGSimplePrice`, `OnchainSimpleTokenPrice`, `OnchainTrade`, `OnchainOHLCV`. Le sigle `C1/G1/G2/G3` sono codici del campo `c` nei payload (identificativo di messaggio), non parte del nome canale. Riferimento: https://docs.coingecko.com/websocket
+- **Webhook Beta**: la pricing page liste "REST + WebSocket + Webhook" sui tier Analyst+ ma NON c'è documentazione tecnica pubblica di eventi/HMAC/retry policy. Trattarlo come **prodotto ancora privato/whitelisted**, non assumere disponibilità.
+- **Path con underscore vs trattino**: il file `llms.txt` di CoinGecko mostra alcuni path in kebab-case (`/coins/id/market-chart`), ma le pagine Reference e l'OpenAPI Spec confermano che i path live sono con **underscore** (`/coins/{id}/market_chart`). Usare gli underscore.
+- **Tier Basic prezzo**: $35/mo monthly oppure $29/mo billed annually. Non confondere con CoinGlass Hobbyist $29 — sono due prodotti diversi.
+
+### Informazioni obsolete
+
+- **Edge cache 10s rimossa il 1 dicembre 2025** su Token Price e Pool Trades. La freshness reale Basic è oggi vicina al real-time origin (con possibile addebito credit aggiuntivo a cache miss). Il documento dice "Basic da 10 secondi" — non più vero.
+- **`market_cap_rank` null per token rehypothecated** dal 4 febbraio 2026 (es. stETH). Usare `market_cap_rank_with_rehypothecated` per mantenerli nel ranking.
+- **`trust_score` deprecato il 3 marzo 2026** sui ticker endpoint (ritorna null). Codice che filtra `trust_score=='green'` smette silenziosamente.
+- **`interval=hourly` ora aperto a tutti i piani** dal 24 marzo 2026 (era enterprise-only) fino a 100 giorni di storico.
+- **OnchainOHLCV con intervalli 15m / 12h / 1d** dal 20 gennaio 2026.
+- **CGSimplePrice WebSocket supporta `vs_currencies`** dal 25 marzo 2026.
+- **Nuovo endpoint `/news`** dal 27 marzo 2026 (paid plan), filtrabile per coin_id, lingua, type.
+
+### Cosa manca per programmare davvero il sistema
+
+1. **Authentication esatta**: header `x-cg-pro-api-key` (raccomandato) o query `x_cg_pro_api_key`. Per Demo: header `x-cg-demo-api-key` su host gratuito.
+2. **Hostname segregation**:
+   - **Pro**: `https://pro-api.coingecko.com/api/v3/`
+   - **Demo**: `https://api.coingecko.com/api/v3/`
+   - I due host **non sono interscambiabili**: usare il Pro key sull'host Demo (o viceversa) restituisce 401 silenzioso.
+3. **Pricing model crediti**: 1 chiamata = 1 credit (modello flat, no weight per endpoint). Demo 10k credits/mese, Basic 100k, Analyst 500k. WebSocket 0.1 credit per response.
+4. **Endpoint chiave NON menzionato**: `/exchanges/{id}/tickers` espone `coin_id` e `target_coin_id` per ogni ticker — è il **ponte ufficiale** per il join symbol-venue → coin_id CoinGecko. Inserirlo nell'architettura di mapping.
+5. **Endpoint paid-only** (NON Demo): `/coins/top_gainers_losers`, `/global/market_cap_chart`, `/coins/{id}/circulating_supply_chart`, `/coins/{id}/total_supply_chart`. Su Demo, emularli da `/coins/markets` con delta 24h.
+6. **OHLC granularity per tier**: `interval=5m` su finestre >1d è Enterprise-only. `daily` e `hourly` da paid plan. Demo: solo daily 365 giorni.
+7. **Caching**: nessun ETag/Last-Modified pubblicamente documentato. Usare TTL applicativo proprio (non basarsi su 304).
+8. **Rate limit retry**: 429 con header `Retry-After`. Implementare exponential backoff + jitter, soprattutto su Analyst (500 rpm) dove il throttling è meno tollerante.
+
+### Architettura integrazione: punti deboli e miglioramenti
+
+**Punti deboli rilevati**:
+- **Mismatch wrapped vs nativo**: WBTC (`wrapped-bitcoin`), WETH (`weth`) hanno coin_id distinti su CoinGecko ma su CoinGlass i symbol perp sono `BTC`/`ETH`. Il join automatico symbol→symbol genera dati sbagliati per i wrapped. Serve **alias map curato a mano**.
+- **Stablecoin ambiguity**: `USD`, `USDT`, `USDC`, `BUSD` sono quote diverse su CoinGlass ma `target_coin_id` di `/exchanges/{id}/tickers` permette di disambiguare.
+- **Hyperliquid wallet positions** è dataset one-way: non ha controparte CoinGecko, entra solo nello scoring CoinGlass-only.
+- **BTC/ETH non hanno `contract_address`**: la chiave primaria proposta `coingecko_coin_id + asset_platform + contract_address` funziona solo per asset on-chain. Per nativi serve `coin_id` + flag `is_native=true`.
+
+**Miglioramenti consigliati**:
+- Alias map esplicita: `BTC → bitcoin`, `ETH → ethereum`, `SOL → solana`, `WBTC → wrapped-bitcoin`, ecc.
+- Master table iniziale via `/coins/list?include_platform=true` (caching giornaliero).
+- Per OHLCV unified: `/onchain/networks/{network}/pools/{address}/ohlcv/{timeframe}` quando si lavora su DEX.
+- `/coins/list/new` per latest 200 listed.
+- `/derivatives/tickers` per cross-check con CoinGlass.
+
+### Validazioni positive (confermate)
+
+- WebSocket Beta data 23 ottobre 2025
+- 4 canali, 10 socket concorrenti, 100 sub/channel/socket, 0.1 credit/response
+- Tier Analyst $129/mo (o $103 annuale), 500k credits, 500 rpm, 70+ endpoint, 10 anni storico
+- Demo gratis: 30 rpm, 10k credits/mese, 50+ endpoint, freshness 60s, 365 giorni storico
+- SDK Python (`coingecko-sdk`), TypeScript (`@coingecko/coingecko-typescript`), CLI (Go binary), OpenAPI Spec — tutti esistono
+- `llms.txt` esistente
+- Tutti gli endpoint Pro elencati nel documento esistono con i path mostrati
+
+### Tooling ufficiale (non descritto nel file originale)
+
+- **Python SDK**: `pip install coingecko-sdk` (Stainless-generated, async client, modelli Pydantic). Repo: https://github.com/coingecko/coingecko-python
+- **TypeScript SDK**: `npm install @coingecko/coingecko-typescript`. Repo: https://github.com/coingecko/coingecko-typescript
+- **CLI Go binary**: `brew install coingecko/coingecko-cli/cg`. Repo: https://github.com/coingecko/coingecko-cli
+- **MCP server pubblico**:
+  - Keyless: `https://mcp.api.coingecko.com/mcp`
+  - BYOK Pro: `https://mcp.pro-api.coingecko.com/mcp`
+  - Snippet `mcp.json`: `{"mcpServers": {"coingecko": {"command": "npx", "args": ["mcp-remote", "https://mcp.api.coingecko.com/mcp"]}}}`
+
+### Link ufficiali consultati
+
+- https://docs.coingecko.com/changelog
+- https://docs.coingecko.com/websocket
+- https://www.coingecko.com/en/api/pricing
+- https://docs.coingecko.com/reference/authentication
+- https://docs.coingecko.com/reference/coins-id
+- https://docs.coingecko.com/reference/coins-id-market-chart
+- https://docs.coingecko.com/reference/coins-top-gainers-losers
+- https://docs.coingecko.com/reference/exchanges-id-tickers
+- https://docs.coingecko.com/reference/coins-list
+- https://docs.coingecko.com/reference/coins-id-ohlc
+- https://docs.coingecko.com/llms.txt
+- https://support.coingecko.com/hc/en-us/articles/4538747001881
+- https://github.com/coingecko/coingecko-python
+- https://github.com/coingecko/coingecko-typescript
+- https://github.com/coingecko/coingecko-api-oas
+- https://github.com/coingecko/coingecko-cli

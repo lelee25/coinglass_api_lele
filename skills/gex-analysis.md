@@ -513,3 +513,35 @@ Livelli GEX di 3+ giorni fa usati come attuali:
 | Pin risk | GEX | Chiusura sul gamma wall alla scadenza venerdi |
 | Anti-tilt | Retrospettive | Size ridotta (80%) dopo loss consecutivi |
 | Counterfactual | Retrospettive | Simulazione alternativa non eseguita |
+
+---
+
+## Cross-reference con le altre skill
+
+```
+LETTA DA QUESTA SKILL (input contestuale):
+  context.macro_regime          <- macro-regime-monitor (modifier slow)
+  context.etf_signal            <- etf-flow-interpreter (modifier strategico)
+  context.funding_signal        <- funding-arb-detector (cost-aware + signal)
+  scratchpad.whale_alerts       <- whale-onchain-monitor (early warning)
+  calibration.asset_thresholds  <- references/calibration-thresholds.md
+
+  -> Applicare i modifier nella PASSO 3 (strength score composito):
+     edge_finale = edge_base * macro_regime.long_w * etf_signal.long_w * size_factor
+
+DELEGA A (sub-skill chiamabili):
+  derivatives-dashboard         (lettura completa derivati invece del PASSO 0 minimale)
+  chart-pattern-recognition     (riconoscimento pattern visivi + reference)
+  scalp-execution               (se cascata SWING NO -> SCALP CHECK)
+
+SCRIVE:
+  context.json (resistances, supports, lw_trend aggiornati)
+  scratchpad.json.active_thesis (tesi operativa con confidence + key_levels)
+  retrospettive.md (ogni decisione con counterfactual)
+  confluence_history.md (livelli GEX × LW con strength score)
+
+NOTA SU CALIBRAZIONE:
+  Le soglie hardcoded (str>9, str>7, GEX>20M) sono BASE.
+  Se calibration.json esiste, sovrascrivile con i percentile rolling 30gg
+  (vedi references/calibration-thresholds.md per il framework completo).
+```

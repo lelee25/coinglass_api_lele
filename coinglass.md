@@ -61,3 +61,70 @@ Il secondo limite è che **non tutti gli endpoint sono disponibili con la stessa
 Il terzo limite è documentale. La guida “Complete Guide” è utile per capire i moduli, ma non è sempre perfettamente allineata al naming operativo delle route: per esempio usa forme come `openInterest` e `fundingRate`, mentre la reference v4 live usa sistematicamente `open-interest` e `funding-rate`. Inoltre la documentazione mescola pagine inglesi molto sintetiche con versioni cinesi o tradizionali che espongono più chiaramente esempi di risposta, cache/update frequency e availability per piano. Si vedono anche incongruenze minori come percorsi con typo del tipo `suported`. Per un team tecnico non è un blocco, ma significa che la verità operativa va verificata endpoint per endpoint, non solo leggendo una guida editoriale. citeturn14view0turn26search3turn27search5turn20search1turn30search0
 
 Il giudizio finale, quindi, è netto. Come **ampiezza di copertura**, CoinGlass API è una delle superfici più interessanti oggi per costruire analytics crypto cross-market: futures, spot, options, ETF, on-chain, macro, order book, liquidazioni, whale flow, WebSocket e perfino layer MCP/skills convivono in un unico sistema coerente. Come **potenziale di integrazione**, è molto alta perché i dataset sono aggregati cross-exchange, i payload sono abbastanza normalizzabili e i casi d’uso vanno dalla dashboard manuale fino all’agente LLM. Come **criticità**, bisogna mettere in conto piano adeguato, verifica attenta delle route vive, e un po’ di lavoro di hardening documentale. Se il tuo obiettivo è costruire un’infrastruttura di intelligence crypto “all-in-one”, questa API ha un livello di profondità e componibilità superiore alla media; se invece ti serve solo il prezzo o qualche candela, sarebbe uno strumento molto più potente del necessario. citeturn41view0turn14view0turn1view2turn33view0turn30search6
+---
+
+## ERRATA / 2026-04-30 update
+
+> Patch redatta dopo validazione con 4 agenti Opus 4.7 che hanno consultato `docs.coinglass.com`, `coinglass.com/pricing`, `github.com/coinglass-official/coinglass-api-skills` e changelog ufficiali. Le citazioni `citeturn…` originali non sono risolvibili esternamente e vanno trattate come riferimenti interni dell'autore. Le affermazioni quantitative chiave del documento sopra (prezzi, rpm, conteggio endpoint, route principali) **risultano confermate**. Quanto segue corregge errori, aggiunge endpoint mancanti e dettaglia ciò che manca per implementare gex-agentkit. Per la guida operativa Hobbyist completa vedere `INTEGRATION-NOTES.md`.
+
+### Errori fattuali da correggere
+
+- **WebSocket subscribe payload**: la sintassi V4 corretta è `{"op": "subscribe", "args": ["liquidationOrders"]}` (NON `{method, channels}` come si trova ancora in alcuni snippet V3 in giro).
+- **WebSocket secondo URL**: oltre a `wss://open-api-v4.coinglass.com/ws` esiste `wss://open-ws.coinglass.com/ws-api?cg-api-key={KEY}` con auth in query string.
+- **Hyperliquid è dentro `futures/`, non `on-chain/`**: nello skill repo ufficiale la cartella reale è `futures/hyperliquid-positions`, non `on-chain/hyperliquid-*`.
+- **Skill repo prerequisito**: `npx skills add ...` richiede **Node.js v22+**.
+- **Rotta "v2" anomala**: `/api/futures/v2/taker-buy-sell-volume/history` con prefisso `/v2/` è incoerente col namespace V4 e va riconfermato sulla docs reference (probabile refuso editoriale).
+- **CoinGlass MCP service** (https://docs.coinglass.com/reference/mcp-service) è **stub Beta**: nessun snippet `mcp.json` ufficiale, nessun endpoint URL pubblicato. Implementazioni community: `forgequant/coinglass-mcp` e `gpsxtreme/mcp-coinglass` (non ufficiali).
+
+### Endpoint mancanti rilevanti per gex-agentkit
+
+- **CVD** (omessi nel documento sopra ma critici): `/api/futures/cvd/history` e `/api/futures/aggregated-cvd/history`.
+- **Footprint 90d**: `/api/futures/footprint` (probabile gating Standard+; verificare con key).
+- **ETF estesi**: `/api/etf/bitcoin/net-assets-history`, `/api/etf/bitcoin/premium-discount-history`, `/api/etf/solana/flow-history`, `/api/etf/xrp/flow-history` (nuovi 2025).
+- **Hong Kong ETF**: `/api/etf/hong-kong-bitcoin/flow-history`.
+- **CDRI**: indice complementare a CGDI, path da confermare nella sezione `indic`.
+- **Large limit orders history**: `/api/futures/orderbook/large-limit-order-history` (gating verosimile Standard+).
+
+### Cosa manca per programmare davvero il sistema
+
+1. **Authentication esatta**: header `CG-API-KEY: <YOUR_KEY>`, no HMAC. Base REST `https://open-api-v4.coinglass.com`.
+2. **Response envelope reale**: `{"code": "0", "msg": "success", "data": [...], "success": true}`. Codici noti: `0` ok, `30001` API key missing/invalid, `40001` generic / plan upgrade required, `50001` rate limit. Il segnale primario di rate limit NON è solo HTTP 429 ma anche `code: 50001` nel body.
+3. **Update frequencies dichiarate** (utili per dimensionare la cache):
+   - exchange/assets, exchange/balance/list: ~1h
+   - economic-data: ~10 min
+   - stableCoin-marketCap-history, fear-greed-history: daily
+   - price/history, futures/coins-markets: real-time / ≤1 min
+   - futures/rsi/list: 10s (gated Standard+)
+4. **Limiti storici per piano**:
+   - **Hobbyist**: 1m=6gg, 3m=20gg, 5m=30gg, 15-30m=90gg, 1h=180gg, 4h=180gg, 1d=all-time
+   - Startup: 1m=12gg, 5m=60gg, 1h=360gg
+   - Standard: 1h=360gg, 2-4h=720gg
+   - Professional: 720gg quasi ovunque, daily all-time
+5. **Heatmap range gating**: il parametro `range=1y` per liquidation heatmap è verosimilmente Standard+. Su Hobbyist usare `range<=180d` e ricostruire 1y localmente persistendo i chunk.
+6. **Skill repo URL**: https://github.com/coinglass-official/coinglass-api-skills — install `npx skills add https://github.com/coinglass-official/coinglass-api-skills` (Node v22+).
+
+### Validazioni positive (confermate)
+
+- Base URL `https://open-api-v4.coinglass.com`
+- Header `CG-API-KEY`
+- WebSocket primario `wss://open-api-v4.coinglass.com/ws`
+- Pricing $29 / $79 / $299 / $699
+- Rate limits 30 / 80 / 300 / 1200 rpm
+- Endpoint count 80+ / 130+ / 150+ / 160+
+- Otto cartelle skill repo (`account, etf, futures, indic, on-chain, options, other, spots`)
+- CGDI / CDRI esistono
+- ETF flow history BTC/ETH/HK
+- Hyperliquid `whale-position` / `whale-alert`
+
+### Link ufficiali consultati
+
+- https://docs.coinglass.com/reference (index)
+- https://docs.coinglass.com/reference/getting-started-with-your-api
+- https://docs.coinglass.com/reference/authentication
+- https://docs.coinglass.com/reference/responses-error-codes
+- https://docs.coinglass.com/reference/endpoint-overview
+- https://docs.coinglass.com/reference/change-log
+- https://docs.coinglass.com/reference/mcp-service (stub Beta)
+- https://www.coinglass.com/pricing
+- https://www.coinglass.com/learn/coinglass-api-v4-en
+- https://github.com/coinglass-official/coinglass-api-skills
