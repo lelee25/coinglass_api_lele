@@ -2475,6 +2475,102 @@ TOTALE: 170+ endpoint testati empiricamente, tutti documentati con
         smoke test riproducibili in tests/.
 ```
 
+### 24.8.bis. TradingView Premium — fonte primaria già attiva nel sistema (2026-05-07)
+
+**Verifica empirica dall'output dell'agent attuale (gex-analyst operativo):**
+
+```
+🌐 Macro NQ/SP/GOLD
+• SPX/VIX/10Y: backdrop neutrale, non panic mode
+• Oil alto (WTI 109.76) resta un elemento di frizione macro
+```
+
+L'utente ha **TradingView Premium €67.95/mese**. Il sistema attuale già consuma
+cross-asset macro feeds da TradingView (WTI, SPX, VIX, 10Y, GOLD esplicitamente
+citati nell'output). **Non serve yfinance né altri provider macro** — TradingView
+li copre già nativamente, real-time, senza delay.
+
+#### Capabilities Premium da sfruttare al massimo
+
+| Feature | Quantità Premium | Sfruttamento gex-agentkit |
+|---|---|---|
+| Pine Script per chart | 25 indicatori | GEX/LW/confluence custom complessi |
+| Alert tecnici | 400 | webhook → server endpoints |
+| Alert di prezzo | 400 | webhook → price-alert-trigger |
+| Barre storiche | 20K | calibration percentile rolling robust |
+| Profilo volume | ✅ | POC/VAH/VAL nativo (senza ricostruzione) |
+| Bar Replay | ✅ | backtest visivo skill |
+| Watchlist multiple | ✅ | dedicated per agent (macro/crypto/altcoin) |
+| Cross-asset feeds | ✅ real-time | DXY/SPX/VIX/Gold/Brent/Bonds/FX |
+
+#### Pattern integrazione TradingView ↔ gex-agentkit
+
+**A. Webhook Pine Script → server endpoint** (game changer, push not polling):
+```
+Pine Script alert condition triggers
+    ↓ POST JSON con payload custom
+{server_endpoint}/api/tv/webhook
+    ↓
+jarvis-main ⟶ price-alert-trigger skill ⟶ ragionamento ⟶ azione
+```
+
+Vantaggio: **niente WS reconnect mgmt**, **niente polling rate limit**, latency < 1s
+end-to-end. TradingView gestisce uptime e retry.
+
+**B. Pine Script come EXPORT layer**:
+Il sistema attuale già usa probabilmente Pine Script per popolare:
+- `confluence_history.md` (livelli GEX × LW con str)
+- `lw_diff_history.md` (bid/ask wall changes session-to-session)
+
+Questi file sono input strutturali per gex-analysis. NON ricostruirli da zero
+nel server — il Pine Script TradingView è la source of truth.
+
+**C. Cross-asset feeds (sostituisce yfinance/Bloomberg)**:
+Pine Script accede nativamente real-time a:
+- Forex: EUR/USD, USD/JPY, DXY
+- Commodity: WTI (CL1!), Brent (BZ1!), Gold (GC1!), Silver
+- Equity: SPX500, NASDAQ100, US30
+- Bonds: US10Y yield, US02Y, spread
+- Volatilità: VIX, MOVE
+- Crypto: BTC, ETH, TOTAL3, dominance
+
+#### Per il Claude server: regola operativa
+
+```
+PRIMA di pensare a yfinance / Alpha Vantage / Bloomberg:
+1. Verifica quali feed cross-asset il Pine Script attuale già produce
+2. Verifica quali webhook/export il sistema già riceve da TradingView
+3. Estendi Pine Script (1 file) per coprire nuove dimensioni se servono
+4. Solo SE Pine Script non basta -> aggiungi yfinance fallback
+
+TradingView Premium è di fatto la "API macro premium" del sistema —
+sostituisce ~€500/mese di altre soluzioni paid (Bloomberg/Refinitiv/AV/Twelve).
+```
+
+#### Pine Script alert webhook — schema raccomandato
+
+```pinescript
+//@version=5
+indicator("GEX Alert Webhook", overlay=true)
+
+gex_level = input.float(81050, "Gamma+ Level")
+str_score = input.float(8.2, "Strength score")
+
+// Trigger condition: prezzo entra in zona ±0.3% dal livello
+in_zone = math.abs(close - gex_level) / gex_level < 0.003
+
+if in_zone
+    alert(
+      '{"asset":"BTCUSDT","level":' + str.tostring(gex_level) +
+      ',"str":' + str.tostring(str_score) +
+      ',"price":' + str.tostring(close) +
+      ',"event":"in_zone","ts":' + str.tostring(time) + '}',
+      alert.freq_once_per_bar_close
+    )
+```
+
+Server endpoint riceve POST JSON, lo passa a `price-alert-trigger`.
+
 ### 24.9. Pattern reusable: bypass Cloudflare 1010 (browser headers)
 
 Aggiunto a `AGENT-ARCHITECTURE-GUIDE.md` §4.bis. Riassunto:
