@@ -1,0 +1,222 @@
+//@version=6
+//
+// =============================================================================
+// Pine Script #3 — BTC.D + USDT.D CRYPTO REGIME (vera altseason detector)
+// =============================================================================
+// Author: gex-agentkit team (lelee25)
+// Last update: 2026-05-08
+// Pine version: v6
+//
+// PURPOSE:
+//   Classifica il regime crypto in 4 stati distinti:
+//     1. BTC_SEASON       — BTC.D rising, capitale concentrato in BTC
+//     2. ETH_SEASON       — ETH/BTC ratio breakout, ETH outperforma BTC
+//     3. ALT_SEASON       — TOTAL3 (alt mcap) rising + USDT.D declining
+//     4. STABLECOIN_SEASON — USDT.D rising = capital outflow from crypto
+//                            (CRUCIALE: NON è altseason, è capitulation)
+//
+//   La maggior parte degli script community CONFONDE stablecoin season
+//   (capital flight to stables) con altseason vera. Questo script corregge
+//   l'errore distinguendo i due via USDT.D direction.
+//
+// EDGE LOGICA:
+//   - CoinGecko/Binance Research: vera altseason richiede SIMULTANEAMENTE
+//     BTC.D ↓, USDT.D ↓, TOTAL3 ↑, ETH/BTC ↑
+//   - Se BTC.D ↓ ma USDT.D ↑ = capitale che esce da crypto in stables = bear
+//
+// USE CASE PER gex-agentkit:
+//   - Filtro target selection per agent multi-asset:
+//     - In BTC_SEASON: universe = BTC + ETH solo, no alt scalping
+//     - In ETH_SEASON: tilt long ETH, neutral alt
+//     - In ALT_SEASON: enable top 50 alt scanner
+//     - In STABLECOIN_SEASON: defensive only, ridurre size globalmente
+//
+//   - Combinato con CoinGecko sector momentum (già in API): doppia conferma
+//     quale settore alt sta tirando (AI, RWA, L2, Memes, ecc.)
+//
+// TICKERS VALIDATED:
+//   CRYPTOCAP:BTC.D, CRYPTOCAP:ETH.D, CRYPTOCAP:USDT.D, CRYPTOCAP:USDC.D,
+//   CRYPTOCAP:TOTAL2, CRYPTOCAP:TOTAL3, CRYPTOCAP:OTHERS.D
+//
+// =============================================================================
+
+indicator("BTC.D + USDT.D Crypto Regime [gex-agentkit]",
+  shorttitle="CRYPT-RGM",
+  overlay=false)
+
+// =============================================================================
+// INPUTS
+// =============================================================================
+ma_short = input.int(20,  "Short MA period", minval=5,  maxval=50,  group="Trend detection")
+ma_long  = input.int(50,  "Long MA period",  minval=20, maxval=200, group="Trend detection")
+mom_period = input.int(30, "Momentum period (bars)", minval=10, maxval=100, group="Trend detection",
+                          tooltip="Periodo per calcolo momentum (rate of change %)")
+stable_thr_high = input.float(7.0, "USDT.D high threshold (%)", minval=4.0, maxval=15.0, step=0.1, group="Stablecoin detection",
+                                tooltip="Sopra questa soglia di dominance USDT, capital flight a stables")
+stable_thr_low  = input.float(4.0, "USDT.D low threshold (%)",  minval=2.0, maxval=8.0,  step=0.1, group="Stablecoin detection")
+ethbtc_breakout_pct = input.float(5.0, "ETH/BTC breakout %", minval=1.0, maxval=20.0, step=0.5, group="ETH season",
+                                tooltip="Percentuale rolling 30d sopra MA50 per confermare ETH season")
+secret = input.string("REPLACE_WITH_SECRET", "Webhook secret token", group="Webhook security")
+
+// =============================================================================
+// FETCH DATA
+// =============================================================================
+btc_dom    = request.security("CRYPTOCAP:BTC.D",    timeframe.period, close, lookahead=barmerge.lookahead_off)
+eth_dom    = request.security("CRYPTOCAP:ETH.D",    timeframe.period, close, lookahead=barmerge.lookahead_off)
+usdt_dom   = request.security("CRYPTOCAP:USDT.D",   timeframe.period, close, lookahead=barmerge.lookahead_off)
+usdc_dom   = request.security("CRYPTOCAP:USDC.D",   timeframe.period, close, lookahead=barmerge.lookahead_off)
+total2     = request.security("CRYPTOCAP:TOTAL2",   timeframe.period, close, lookahead=barmerge.lookahead_off)
+total3     = request.security("CRYPTOCAP:TOTAL3",   timeframe.period, close, lookahead=barmerge.lookahead_off)
+btc_close  = request.security("BINANCE:BTCUSDT",    timeframe.period, close, lookahead=barmerge.lookahead_off)
+eth_close  = request.security("BINANCE:ETHUSDT",    timeframe.period, close, lookahead=barmerge.lookahead_off)
+
+// Combined stablecoin dominance
+stable_dom = usdt_dom + usdc_dom
+
+// =============================================================================
+// TREND METRICS
+// =============================================================================
+// BTC.D trend
+btc_dom_ma_short = ta.sma(btc_dom, ma_short)
+btc_dom_ma_long  = ta.sma(btc_dom, ma_long)
+btc_dom_trend    = btc_dom > btc_dom_ma_short and btc_dom_ma_short > btc_dom_ma_long  // rising
+btc_dom_falling  = btc_dom < btc_dom_ma_short and btc_dom_ma_short < btc_dom_ma_long
+btc_dom_mom      = (btc_dom / btc_dom[mom_period] - 1) * 100  // % change over N bars
+
+// USDT.D trend (key for stablecoin season detection)
+usdt_dom_ma_short = ta.sma(usdt_dom, ma_short)
+usdt_dom_ma_long  = ta.sma(usdt_dom, ma_long)
+usdt_dom_rising   = usdt_dom > usdt_dom_ma_short and usdt_dom_ma_short > usdt_dom_ma_long
+usdt_dom_falling  = usdt_dom < usdt_dom_ma_short and usdt_dom_ma_short < usdt_dom_ma_long
+usdt_dom_mom      = (usdt_dom / usdt_dom[mom_period] - 1) * 100
+
+// TOTAL3 (altcoin mcap) trend
+total3_ma_long = ta.sma(total3, ma_long)
+total3_rising  = total3 > total3_ma_long
+total3_mom     = (total3 / total3[mom_period] - 1) * 100
+
+// ETH/BTC ratio momentum
+ethbtc = eth_close / btc_close
+ethbtc_ma = ta.sma(ethbtc, ma_long)
+ethbtc_above_ma_pct = (ethbtc / ethbtc_ma - 1) * 100
+ethbtc_breakout = ethbtc_above_ma_pct > ethbtc_breakout_pct
+
+// =============================================================================
+// REGIME CLASSIFICATION (priority logic)
+// =============================================================================
+// Order of checks matters: stablecoin season has priority (defensive),
+// then ETH season, then altseason, then BTC season, fallback NEUTRAL.
+
+regime = "neutral"
+regime_score = 0
+regime_confidence = 0.0
+
+// Priority 1: STABLECOIN SEASON (capital flight)
+//   USDT.D rising AND TOTAL3 falling AND BTC.D NOT clearly rising
+if usdt_dom_rising and not total3_rising and usdt_dom > stable_thr_low
+    regime := "stablecoin_season"
+    regime_score := -2
+    // Confidence based on USDT.D level + momentum strength
+    regime_confidence := math.min(1.0, (usdt_dom_mom / 5.0) + (usdt_dom > stable_thr_high ? 0.3 : 0.0))
+
+// Priority 2: ETH SEASON
+//   ETH/BTC breakout AND BTC.D falling AND USDT.D NOT rising
+else if ethbtc_breakout and btc_dom_falling and not usdt_dom_rising
+    regime := "eth_season"
+    regime_score := 1
+    regime_confidence := math.min(1.0, ethbtc_above_ma_pct / 15.0 + 0.3)
+
+// Priority 3: ALT SEASON (vera, non stablecoin)
+//   BTC.D falling AND USDT.D falling AND TOTAL3 rising AND ETH/BTC neutral or rising
+else if btc_dom_falling and usdt_dom_falling and total3_rising and total3_mom > 5.0
+    regime := "alt_season"
+    regime_score := 2
+    regime_confidence := math.min(1.0, (total3_mom / 20.0) + 0.4)
+
+// Priority 4: BTC SEASON
+//   BTC.D rising AND TOTAL3 not rising
+else if btc_dom_trend and not total3_rising
+    regime := "btc_season"
+    regime_score := 0
+    regime_confidence := math.min(1.0, (btc_dom_mom / 5.0) + 0.3)
+
+// Else: neutral
+else
+    regime := "neutral"
+    regime_score := 0
+    regime_confidence := 0.4
+
+// =============================================================================
+// PLOT
+// =============================================================================
+regime_color = regime == "stablecoin_season" ? color.red :
+               regime == "btc_season"        ? color.orange :
+               regime == "eth_season"        ? color.blue :
+               regime == "alt_season"        ? color.lime :
+                                                color.gray
+
+plot(btc_dom,    "BTC.D %",    color=color.orange,    linewidth=2)
+plot(eth_dom,    "ETH.D %",    color=color.blue,      linewidth=1)
+plot(usdt_dom,   "USDT.D %",   color=color.red,       linewidth=2)
+plot(stable_dom, "Stables %",  color=color.new(color.red, 50), linewidth=1, display=display.none)
+
+bgcolor(color.new(regime_color, 92))
+
+// Status table
+if barstate.islast
+    var table info = table.new(position.top_right, 2, 9, bgcolor=color.new(color.black, 70))
+    table.cell(info, 0, 0, "Regime",       text_color=color.white)
+    table.cell(info, 1, 0, regime,         text_color=regime_color)
+    table.cell(info, 0, 1, "Confidence",   text_color=color.white)
+    table.cell(info, 1, 1, str.tostring(regime_confidence, "#.##"), text_color=color.white)
+    table.cell(info, 0, 2, "BTC.D",        text_color=color.white)
+    table.cell(info, 1, 2, str.tostring(btc_dom, "#.##") + "%", text_color=color.orange)
+    table.cell(info, 0, 3, "ETH.D",        text_color=color.white)
+    table.cell(info, 1, 3, str.tostring(eth_dom, "#.##") + "%", text_color=color.blue)
+    table.cell(info, 0, 4, "USDT.D",       text_color=color.white)
+    table.cell(info, 1, 4, str.tostring(usdt_dom, "#.##") + "%", text_color=color.red)
+    table.cell(info, 0, 5, "Stables tot",  text_color=color.white)
+    table.cell(info, 1, 5, str.tostring(stable_dom, "#.##") + "%", text_color=color.white)
+    table.cell(info, 0, 6, "TOTAL3 mom",   text_color=color.white)
+    table.cell(info, 1, 6, str.tostring(total3_mom, "#.##") + "%", text_color=total3_mom > 0 ? color.lime : color.red)
+    table.cell(info, 0, 7, "ETH/BTC %vsMA",text_color=color.white)
+    table.cell(info, 1, 7, str.tostring(ethbtc_above_ma_pct, "#.##") + "%", text_color=color.white)
+    table.cell(info, 0, 8, "BTC.D mom",    text_color=color.white)
+    table.cell(info, 1, 8, str.tostring(btc_dom_mom, "#.##") + "%", text_color=btc_dom_mom > 0 ? color.lime : color.red)
+
+// =============================================================================
+// WEBHOOK ALERTS
+// =============================================================================
+prev_regime = regime[1]
+
+if barstate.isconfirmed and regime != prev_regime
+    // Determine implication for agentkit
+    universe_recommendation = regime == "btc_season"        ? "btc_eth_only" :
+                              regime == "eth_season"        ? "eth_focus_btc_neutral" :
+                              regime == "alt_season"        ? "top_50_alts_enabled" :
+                              regime == "stablecoin_season" ? "defensive_size_reduce_30pct" :
+                                                              "neutral_default"
+
+    msg = '{' +
+      '"event":"crypto_regime_change",' +
+      '"timeframe":"' + timeframe.period + '",' +
+      '"regime":"' + regime + '",' +
+      '"prev_regime":"' + prev_regime + '",' +
+      '"regime_score":' + str.tostring(regime_score) + ',' +
+      '"confidence":' + str.tostring(regime_confidence, "#.##") + ',' +
+      '"universe_recommendation":"' + universe_recommendation + '",' +
+      '"metrics":{' +
+        '"btc_dom":' + str.tostring(btc_dom, "#.###") + ',' +
+        '"eth_dom":' + str.tostring(eth_dom, "#.###") + ',' +
+        '"usdt_dom":' + str.tostring(usdt_dom, "#.###") + ',' +
+        '"usdc_dom":' + str.tostring(usdc_dom, "#.###") + ',' +
+        '"stable_dom_total":' + str.tostring(stable_dom, "#.###") + ',' +
+        '"btc_dom_momentum_pct":' + str.tostring(btc_dom_mom, "#.##") + ',' +
+        '"usdt_dom_momentum_pct":' + str.tostring(usdt_dom_mom, "#.##") + ',' +
+        '"total3_momentum_pct":' + str.tostring(total3_mom, "#.##") + ',' +
+        '"ethbtc_above_ma_pct":' + str.tostring(ethbtc_above_ma_pct, "#.##") +
+      '},' +
+      '"ts":"' + str.format_time(time, "yyyy-MM-ddTHH:mm:ssZ", "UTC") + '",' +
+      '"secret":"' + secret + '"' +
+    '}'
+    alert(msg, alert.freq_once_per_bar_close)

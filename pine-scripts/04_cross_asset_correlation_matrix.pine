@@ -1,0 +1,222 @@
+//@version=6
+//
+// =============================================================================
+// Pine Script #4 — CROSS-ASSET CORRELATION MATRIX (BTC vs Macro)
+// =============================================================================
+// Author: gex-agentkit team (lelee25)
+// Last update: 2026-05-08
+// Pine version: v6
+//
+// PURPOSE:
+//   Calcola correlation rolling tra BTC e 6 asset macro (SPX, NDX, DXY,
+//   GOLD, US10Y, VIX) su 30 bars. Classifica il regime crypto in 3 stati:
+//
+//     1. RISK_ON_LIQUIDITY  — BTC corr SPX/NDX > 0.6, corr DXY < -0.4
+//                              (BTC trade come tech stock, beta high)
+//     2. FLIGHT_TO_SAFETY   — BTC corr Gold > 0.4, corr SPX < 0
+//                              (BTC trade come safe haven inflation hedge)
+//     3. DECOUPLED          — Tutte le correlazioni < |0.3|
+//                              (BTC idiosyncratic, crypto-specific drivers)
+//
+// USE CASE PER gex-agentkit:
+//   - Diventa il "macro brain" centrale del sistema
+//   - Filtri agent execution:
+//     - In RISK_ON: equity sentiment dominante → segui SPX/NDX direzione
+//     - In FLIGHT: BTC crisis hedge → ridurre size, BTC decoupling
+//     - In DECOUPLED: arbitrage stat funziona → enable funding-arb agent
+//
+//   - Filtra setup contrarian:
+//     - In RISK_ON con SPX -3%, BTC non rimbalza solo: aspetta SPX recovery
+//     - In DECOUPLED, BTC può andare contro SPX → contrarian setup ON
+//
+// EDGE LOGICA:
+//   - BTC ha 3 regime distinti documentati (correlato NDX/SPX = risk-on,
+//     correlato Gold = inflation hedge, decorrelato = idiosyncratic)
+//   - Source: TradingView script "BTC Macro Correlation Oscillator &
+//     Multi-Timeframe Matrix" (yanikroestiqoo00, 2025)
+//   - Pattern: il regime cambia ~ogni 4-12 settimane, dura sufficientemente
+//     per essere actionable come modifier (non come timing trigger)
+//
+// TICKERS VALIDATED:
+//   SP:SPX, TVC:NDX, TVC:DXY, COMEX:GC1!, TVC:US10Y, CBOE:VIX
+//
+// =============================================================================
+
+indicator("Cross-Asset Correlation Matrix [gex-agentkit]",
+  shorttitle="X-CORR",
+  overlay=false)
+
+// =============================================================================
+// INPUTS
+// =============================================================================
+corr_length      = input.int(30, "Correlation lookback (bars)", minval=10, maxval=200, group="Correlation")
+high_corr_thr    = input.float(0.6,  "High positive correlation",        minval=0.3, maxval=0.9, step=0.05, group="Thresholds")
+low_corr_thr     = input.float(-0.4, "Low negative correlation",         minval=-0.9, maxval=-0.2, step=0.05, group="Thresholds")
+decouple_thr     = input.float(0.3,  "Decoupling threshold (abs)",       minval=0.1, maxval=0.5, step=0.05, group="Thresholds")
+stable_bars      = input.int(3, "Bars to confirm regime", minval=1, maxval=10, group="Persistence")
+secret           = input.string("REPLACE_WITH_SECRET", "Webhook secret token", group="Webhook security")
+
+// =============================================================================
+// FETCH DATA + RETURNS (returns are stationary, better for correlation)
+// =============================================================================
+spx   = request.security("SP:SPX",      timeframe.period, close, lookahead=barmerge.lookahead_off)
+ndx   = request.security("TVC:NDX",     timeframe.period, close, lookahead=barmerge.lookahead_off)
+dxy   = request.security("TVC:DXY",     timeframe.period, close, lookahead=barmerge.lookahead_off)
+gold  = request.security("COMEX:GC1!",  timeframe.period, close, lookahead=barmerge.lookahead_off)
+us10y = request.security("TVC:US10Y",   timeframe.period, close, lookahead=barmerge.lookahead_off)
+vix   = request.security("CBOE:VIX",    timeframe.period, close, lookahead=barmerge.lookahead_off)
+btc   = close  // (questo script va su chart BTC/USDT)
+
+// Compute log returns for correlation (stationary)
+btc_ret   = math.log(btc / btc[1])
+spx_ret   = math.log(spx / spx[1])
+ndx_ret   = math.log(ndx / ndx[1])
+dxy_ret   = math.log(dxy / dxy[1])
+gold_ret  = math.log(gold / gold[1])
+us10y_ret = math.log(us10y / us10y[1])
+vix_ret   = math.log(vix / vix[1])
+
+// =============================================================================
+// ROLLING CORRELATIONS
+// =============================================================================
+corr_btc_spx   = ta.correlation(btc_ret, spx_ret,   corr_length)
+corr_btc_ndx   = ta.correlation(btc_ret, ndx_ret,   corr_length)
+corr_btc_dxy   = ta.correlation(btc_ret, dxy_ret,   corr_length)
+corr_btc_gold  = ta.correlation(btc_ret, gold_ret,  corr_length)
+corr_btc_us10y = ta.correlation(btc_ret, us10y_ret, corr_length)
+corr_btc_vix   = ta.correlation(btc_ret, vix_ret,   corr_length)
+
+// Strongest absolute correlation (which macro asset BTC tracks most)
+abs_corrs = array.from(math.abs(corr_btc_spx), math.abs(corr_btc_ndx),
+                       math.abs(corr_btc_dxy), math.abs(corr_btc_gold),
+                       math.abs(corr_btc_us10y), math.abs(corr_btc_vix))
+labels = array.from("SPX", "NDX", "DXY", "GOLD", "US10Y", "VIX")
+strongest_idx = array.indexof(abs_corrs, array.max(abs_corrs))
+strongest_link = array.get(labels, strongest_idx)
+strongest_value = array.max(abs_corrs)
+
+// =============================================================================
+// REGIME CLASSIFICATION
+// =============================================================================
+// 3 regime + neutral fallback
+
+is_risk_on = (corr_btc_spx > high_corr_thr or corr_btc_ndx > high_corr_thr) and corr_btc_dxy < low_corr_thr
+is_flight  = corr_btc_gold > 0.4 and corr_btc_spx < 0 and corr_btc_dxy > 0  // BTC con gold contro equity
+is_decoupled = math.abs(corr_btc_spx) < decouple_thr and
+               math.abs(corr_btc_ndx) < decouple_thr and
+               math.abs(corr_btc_dxy) < decouple_thr and
+               math.abs(corr_btc_gold) < decouple_thr
+
+raw_regime = is_risk_on  ? "risk_on_liquidity" :
+             is_flight    ? "flight_to_safety" :
+             is_decoupled ? "decoupled"        :
+                            "transitioning"
+
+// Smoothing: regime confermato solo dopo N bar consecutivi nello stesso stato
+var int regime_age = 0
+var string current_regime = "transitioning"
+var string committed_regime = "transitioning"
+
+if raw_regime == current_regime
+    regime_age += 1
+else
+    current_regime := raw_regime
+    regime_age := 1
+
+if regime_age >= stable_bars
+    committed_regime := current_regime
+
+// Track regime change for webhook
+regime_changed = committed_regime != committed_regime[1] and barstate.isconfirmed
+
+// Compute regime confidence: how strongly the correlation matrix matches the regime
+regime_confidence = 0.0
+if committed_regime == "risk_on_liquidity"
+    regime_confidence := math.min(1.0, (math.max(corr_btc_spx, corr_btc_ndx) - high_corr_thr) * 2 +
+                                       (low_corr_thr - corr_btc_dxy) * 2)
+else if committed_regime == "flight_to_safety"
+    regime_confidence := math.min(1.0, (corr_btc_gold - 0.4) * 2 +
+                                       math.max(0.0, -corr_btc_spx) * 2)
+else if committed_regime == "decoupled"
+    regime_confidence := math.min(1.0, 1.0 - strongest_value)
+else
+    regime_confidence := 0.4
+
+// =============================================================================
+// PLOT
+// =============================================================================
+plot(corr_btc_spx,   "BTC↔SPX",   color=color.blue,    linewidth=2)
+plot(corr_btc_ndx,   "BTC↔NDX",   color=color.aqua,    linewidth=1)
+plot(corr_btc_dxy,   "BTC↔DXY",   color=color.red,     linewidth=2)
+plot(corr_btc_gold,  "BTC↔GOLD",  color=color.yellow,  linewidth=2)
+plot(corr_btc_us10y, "BTC↔US10Y", color=color.orange,  linewidth=1)
+plot(corr_btc_vix,   "BTC↔VIX",   color=color.purple,  linewidth=1)
+
+hline(0,    "Zero correlation", color=color.gray)
+hline(high_corr_thr,  "High +",  color=color.green, linestyle=hline.style_dashed)
+hline(low_corr_thr,   "Low -",   color=color.red,   linestyle=hline.style_dashed)
+
+regime_color = committed_regime == "risk_on_liquidity" ? color.green :
+               committed_regime == "flight_to_safety"  ? color.yellow :
+               committed_regime == "decoupled"         ? color.aqua  :
+                                                          color.gray
+bgcolor(color.new(regime_color, 90))
+
+// Status table
+if barstate.islast
+    var table info = table.new(position.top_right, 2, 11, bgcolor=color.new(color.black, 70))
+    table.cell(info, 0, 0, "Regime",         text_color=color.white)
+    table.cell(info, 1, 0, committed_regime, text_color=regime_color)
+    table.cell(info, 0, 1, "Confidence",     text_color=color.white)
+    table.cell(info, 1, 1, str.tostring(regime_confidence, "#.##"), text_color=color.white)
+    table.cell(info, 0, 2, "Strongest link", text_color=color.white)
+    table.cell(info, 1, 2, strongest_link + " (" + str.tostring(strongest_value, "#.##") + ")", text_color=color.white)
+    table.cell(info, 0, 3, "Age",            text_color=color.white)
+    table.cell(info, 1, 3, str.tostring(regime_age) + " bars", text_color=color.white)
+    table.cell(info, 0, 4, "BTC↔SPX",        text_color=color.white)
+    table.cell(info, 1, 4, str.tostring(corr_btc_spx,   "#.###"), text_color=color.blue)
+    table.cell(info, 0, 5, "BTC↔NDX",        text_color=color.white)
+    table.cell(info, 1, 5, str.tostring(corr_btc_ndx,   "#.###"), text_color=color.aqua)
+    table.cell(info, 0, 6, "BTC↔DXY",        text_color=color.white)
+    table.cell(info, 1, 6, str.tostring(corr_btc_dxy,   "#.###"), text_color=color.red)
+    table.cell(info, 0, 7, "BTC↔GOLD",       text_color=color.white)
+    table.cell(info, 1, 7, str.tostring(corr_btc_gold,  "#.###"), text_color=color.yellow)
+    table.cell(info, 0, 8, "BTC↔US10Y",      text_color=color.white)
+    table.cell(info, 1, 8, str.tostring(corr_btc_us10y, "#.###"), text_color=color.orange)
+    table.cell(info, 0, 9, "BTC↔VIX",        text_color=color.white)
+    table.cell(info, 1, 9, str.tostring(corr_btc_vix,   "#.###"), text_color=color.purple)
+    table.cell(info, 0, 10, "Length",        text_color=color.white)
+    table.cell(info, 1, 10, str.tostring(corr_length) + " bars", text_color=color.white)
+
+// =============================================================================
+// WEBHOOK ALERTS
+// =============================================================================
+if regime_changed
+    // Implications for gex-agentkit per regime
+    agent_filter = committed_regime == "risk_on_liquidity" ? "follow_equity_lead_size_normal" :
+                   committed_regime == "flight_to_safety"  ? "reduce_size_50pct_no_swing"     :
+                   committed_regime == "decoupled"         ? "enable_arb_agent_full_size"     :
+                                                              "transitioning_neutral"
+
+    msg = '{' +
+      '"event":"crossasset_regime_change",' +
+      '"timeframe":"' + timeframe.period + '",' +
+      '"regime":"' + committed_regime + '",' +
+      '"prev_regime":"' + committed_regime[1] + '",' +
+      '"confidence":' + str.tostring(regime_confidence, "#.##") + ',' +
+      '"strongest_link":"' + strongest_link + '",' +
+      '"strongest_corr":' + str.tostring(strongest_value, "#.##") + ',' +
+      '"correlations":{' +
+        '"btc_spx":'   + str.tostring(corr_btc_spx,   "#.####") + ',' +
+        '"btc_ndx":'   + str.tostring(corr_btc_ndx,   "#.####") + ',' +
+        '"btc_dxy":'   + str.tostring(corr_btc_dxy,   "#.####") + ',' +
+        '"btc_gold":'  + str.tostring(corr_btc_gold,  "#.####") + ',' +
+        '"btc_us10y":' + str.tostring(corr_btc_us10y, "#.####") + ',' +
+        '"btc_vix":'   + str.tostring(corr_btc_vix,   "#.####") +
+      '},' +
+      '"agent_filter":"' + agent_filter + '",' +
+      '"correlation_length_bars":' + str.tostring(corr_length) + ',' +
+      '"ts":"' + str.format_time(time, "yyyy-MM-ddTHH:mm:ssZ", "UTC") + '",' +
+      '"secret":"' + secret + '"' +
+    '}'
+    alert(msg, alert.freq_once_per_bar_close)

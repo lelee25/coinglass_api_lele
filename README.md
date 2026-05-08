@@ -179,6 +179,14 @@ I report più vecchi (`smoke_report.md`, `_full.md`, `_v3.md`, `_v4_full.md`) so
 engine/
 └── price_feeds.py                        WS Bitget+Binance verificato funzionante
                                            (riutilizzabile, auto-reconnect, ping/pong)
+
+pine-scripts/                              5 Pine Script v6 production-ready per TradingView
+├── 01_hurst_regime_filter.pine            Master switch trending/mean-rev (chart 4h BTC)
+├── 02_vix_term_structure.pine             VIX9D/VIX/VIX3M slope contrarian (Johnson 2017 JFQA)
+├── 03_btcd_usdtd_crypto_regime.pine       Vera altseason vs stablecoin season detector
+├── 04_cross_asset_correlation_matrix.pine Macro brain: BTC ↔ SPX/DXY/Gold/NDX/US10Y/VIX
+├── 05_ict_smc_confluence.pine             Execution-grade: sweep + FVG + BoS triple confluence
+└── README.md                              Setup TradingView + webhook schemas
 ```
 
 ### Configurazione

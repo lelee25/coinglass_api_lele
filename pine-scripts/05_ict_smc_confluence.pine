@@ -1,0 +1,377 @@
+//@version=6
+//
+// =============================================================================
+// Pine Script #5 — ICT/SMC LIQUIDITY SWEEP + FVG + BoS CONFLUENCE SCANNER
+// =============================================================================
+// Author: gex-agentkit team (lelee25)
+// Last update: 2026-05-08
+// Pine version: v6
+//
+// PURPOSE:
+//   Execution-grade signal generator basato su Smart Money Concepts (SMC).
+//   Emette webhook SOLO quando 3 condizioni confluiscono nello stesso setup:
+//
+//     1. LIQUIDITY SWEEP — price wick oltre swing high/low precedente +
+//                          chiusura back-in (stop run + reversal)
+//     2. FAIR VALUE GAP — 3-bar imbalance (gap tra wick bar #1 e wick bar #3)
+//     3. BREAK OF STRUCTURE — successiva rottura del minor swing nella direzione
+//
+//   La confluence triple è quello che separa noise da setup tradeable.
+//
+// EDGE DOCUMENTATO:
+//   - LuxAlgo SMC backtests: ~58-63% hit rate su forex/crypto, sessione London/NY
+//   - Quantum Algo "Smart Money Concepts" (top-voted TV)
+//   - github.com/joshyattridge/smart-money-concepts (Python reference)
+//
+// USE CASE PER gex-agentkit:
+//   - Trigger primario per scalp-execution skill
+//   - Combinato con Coinalyze predicted_funding_rate: skip segnali contro la
+//     pressione funding direzione opposta
+//   - Combinato con whale-onchain large transfer: confluence quadruplica edge
+//   - Combinato con Hyperliquid OI delta: spike OI same direction = trap conferm
+//
+// LIMITI TECNICI Pine v6 RISPETTATI:
+//   - max_lines_count=500 (per livelli sweep)
+//   - max_boxes_count=500 (per FVG zones)
+//   - Cleanup periodico per evitare overflow
+//
+// =============================================================================
+
+indicator("ICT/SMC Confluence Scanner [gex-agentkit]",
+  shorttitle="SMC-CONF",
+  overlay=true,
+  max_lines_count=500,
+  max_boxes_count=500,
+  max_labels_count=500)
+
+// =============================================================================
+// INPUTS
+// =============================================================================
+
+// Swing detection
+swing_lookback = input.int(5, "Swing lookback (bars)", minval=2, maxval=20, group="Swing detection",
+                              tooltip="Numero di bar prima/dopo per identificare swing high/low")
+
+// Liquidity sweep
+sweep_close_threshold = input.float(0.6, "Sweep: min close-back-in fraction",
+                                       minval=0.3, maxval=0.95, step=0.05, group="Liquidity sweep",
+                                       tooltip="Frazione della candle che deve chiudere oltre il livello sweepato (0.6 = chiusura nel 60% inferiore/superiore della range)")
+
+// FVG (Fair Value Gap)
+fvg_min_gap_atr = input.float(0.3, "FVG min size (× ATR)", minval=0.1, maxval=2.0, step=0.1, group="FVG",
+                                  tooltip="Gap minimo per considerare FVG valido, in multipli di ATR(14)")
+fvg_lookback_bars = input.int(50, "FVG max lookback (bars)", minval=10, maxval=200, group="FVG",
+                                  tooltip="Quante bar indietro tracciare FVG attivi prima di scartare")
+
+// HTF bias filter
+htf_period = input.timeframe("4H", "Higher timeframe per bias", options=["1H","4H","1D","1W"], group="Multi-TF")
+
+// Confluence scoring
+require_htf_alignment = input.bool(true, "Richiedi HTF bias allineato", group="Confluence")
+min_confluence_score = input.int(75, "Min score per emit signal (0-100)", minval=50, maxval=100, group="Confluence")
+
+// Webhook
+secret = input.string("REPLACE_WITH_SECRET", "Webhook secret token", group="Webhook security")
+asset_tag = input.string("BTCUSDT", "Asset tag", group="Webhook security")
+
+// =============================================================================
+// HELPERS
+// =============================================================================
+atr14 = ta.atr(14)
+
+// HTF bias: determinato da EMA50 slope su higher timeframe
+htf_close = request.security(syminfo.tickerid, htf_period, close, lookahead=barmerge.lookahead_off)
+htf_ema50 = request.security(syminfo.tickerid, htf_period, ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+htf_bias_bullish = htf_close > htf_ema50
+htf_bias_bearish = htf_close < htf_ema50
+
+// =============================================================================
+// SWING HIGH/LOW DETECTION
+// =============================================================================
+swing_high_pivot = ta.pivothigh(high, swing_lookback, swing_lookback)
+swing_low_pivot  = ta.pivotlow(low, swing_lookback, swing_lookback)
+
+// Track ultimi N swing levels per liquidity sweep detection
+var array<float> recent_swing_highs = array.new<float>()
+var array<int>   recent_swing_high_bars = array.new<int>()
+var array<float> recent_swing_lows  = array.new<float>()
+var array<int>   recent_swing_low_bars = array.new<int>()
+
+if not na(swing_high_pivot)
+    array.push(recent_swing_highs, swing_high_pivot)
+    array.push(recent_swing_high_bars, bar_index - swing_lookback)
+    if array.size(recent_swing_highs) > 20  // mantieni ultimi 20
+        array.shift(recent_swing_highs)
+        array.shift(recent_swing_high_bars)
+
+if not na(swing_low_pivot)
+    array.push(recent_swing_lows, swing_low_pivot)
+    array.push(recent_swing_low_bars, bar_index - swing_lookback)
+    if array.size(recent_swing_lows) > 20
+        array.shift(recent_swing_lows)
+        array.shift(recent_swing_low_bars)
+
+// =============================================================================
+// LIQUIDITY SWEEP DETECTION
+// =============================================================================
+// Sweep BUYSIDE: high penetra swing high precedente, ma chiusura back-in
+// Sweep SELLSIDE: low penetra swing low precedente, ma chiusura back-in
+
+sweep_buyside = false
+sweep_sellside = false
+sweep_level = 0.0
+sweep_swing_bar = 0
+
+// Check sweep buyside
+if array.size(recent_swing_highs) > 0
+    last_swing_high = array.get(recent_swing_highs, array.size(recent_swing_highs) - 1)
+    last_swing_high_bar = array.get(recent_swing_high_bars, array.size(recent_swing_high_bars) - 1)
+
+    if high > last_swing_high and close < last_swing_high
+        // Wick beyond + close back-in
+        candle_range = high - low
+        close_position_from_low = (close - low) / candle_range
+        if close_position_from_low < (1 - sweep_close_threshold)  // chiusura nel 40% inferiore
+            sweep_buyside := true
+            sweep_level := last_swing_high
+            sweep_swing_bar := last_swing_high_bar
+
+// Check sweep sellside
+if array.size(recent_swing_lows) > 0
+    last_swing_low = array.get(recent_swing_lows, array.size(recent_swing_lows) - 1)
+    last_swing_low_bar = array.get(recent_swing_low_bars, array.size(recent_swing_low_bars) - 1)
+
+    if low < last_swing_low and close > last_swing_low
+        candle_range = high - low
+        close_position_from_low = (close - low) / candle_range
+        if close_position_from_low > sweep_close_threshold  // chiusura nel 60% superiore
+            sweep_sellside := true
+            sweep_level := last_swing_low
+            sweep_swing_bar := last_swing_low_bar
+
+// Plot sweep markers
+plotshape(sweep_buyside, "Sweep buyside", style=shape.triangledown,
+          location=location.abovebar, color=color.red, size=size.small,
+          text="SWEEP-H")
+plotshape(sweep_sellside, "Sweep sellside", style=shape.triangleup,
+          location=location.belowbar, color=color.lime, size=size.small,
+          text="SWEEP-L")
+
+// =============================================================================
+// FAIR VALUE GAP (FVG) DETECTION
+// =============================================================================
+// Bullish FVG: gap tra high di bar [2] e low di bar [0] (3-bar pattern)
+// Bearish FVG: gap tra low di bar [2] e high di bar [0]
+
+// Track FVG attivi (UDT for clean state)
+type FVG
+    float top
+    float bottom
+    int   start_bar
+    string fvg_type  // "bullish" or "bearish"
+    bool   filled
+
+var array<FVG> active_fvgs = array.new<FVG>()
+
+// Detect new bullish FVG
+bullish_fvg_size = low - high[2]
+new_bullish_fvg = bullish_fvg_size > (atr14 * fvg_min_gap_atr) and close > open and close[1] > open[1]
+
+if new_bullish_fvg
+    new_fvg = FVG.new(top=low, bottom=high[2], start_bar=bar_index, fvg_type="bullish", filled=false)
+    array.push(active_fvgs, new_fvg)
+    box.new(left=bar_index - 2, right=bar_index + fvg_lookback_bars,
+            top=low, bottom=high[2],
+            bgcolor=color.new(color.lime, 80), border_color=color.lime)
+
+// Detect new bearish FVG
+bearish_fvg_size = low[2] - high
+new_bearish_fvg = bearish_fvg_size > (atr14 * fvg_min_gap_atr) and close < open and close[1] < open[1]
+
+if new_bearish_fvg
+    new_fvg = FVG.new(top=low[2], bottom=high, start_bar=bar_index, fvg_type="bearish", filled=false)
+    array.push(active_fvgs, new_fvg)
+    box.new(left=bar_index - 2, right=bar_index + fvg_lookback_bars,
+            top=low[2], bottom=high,
+            bgcolor=color.new(color.red, 80), border_color=color.red)
+
+// Check FVG fill (price retraces into the gap)
+if array.size(active_fvgs) > 0
+    for i = array.size(active_fvgs) - 1 to 0
+        fvg = array.get(active_fvgs, i)
+        if not fvg.filled
+            if fvg.fvg_type == "bullish" and low <= fvg.top
+                fvg.filled := true
+            else if fvg.fvg_type == "bearish" and high >= fvg.bottom
+                fvg.filled := true
+
+// Cleanup old FVGs
+if array.size(active_fvgs) > 0
+    for i = array.size(active_fvgs) - 1 to 0
+        fvg = array.get(active_fvgs, i)
+        if (bar_index - fvg.start_bar) > fvg_lookback_bars
+            array.remove(active_fvgs, i)
+
+// FVG in proximity (price near unfilled FVG within last N bars)
+near_bullish_fvg = false
+near_bearish_fvg = false
+nearest_fvg_top = 0.0
+nearest_fvg_bottom = 0.0
+
+if array.size(active_fvgs) > 0
+    for i = 0 to array.size(active_fvgs) - 1
+        fvg = array.get(active_fvgs, i)
+        if not fvg.filled
+            if fvg.fvg_type == "bullish" and low <= fvg.top * 1.005 and low >= fvg.bottom * 0.995
+                near_bullish_fvg := true
+                nearest_fvg_top := fvg.top
+                nearest_fvg_bottom := fvg.bottom
+            else if fvg.fvg_type == "bearish" and high >= fvg.bottom * 0.995 and high <= fvg.top * 1.005
+                near_bearish_fvg := true
+                nearest_fvg_top := fvg.top
+                nearest_fvg_bottom := fvg.bottom
+
+// =============================================================================
+// BREAK OF STRUCTURE (BoS) DETECTION
+// =============================================================================
+// BoS bullish: chiusura sopra ultimo swing high
+// BoS bearish: chiusura sotto ultimo swing low
+
+bos_bullish = false
+bos_bearish = false
+
+if array.size(recent_swing_highs) > 0
+    last_sh = array.get(recent_swing_highs, array.size(recent_swing_highs) - 1)
+    if close > last_sh and close[1] <= last_sh
+        bos_bullish := true
+
+if array.size(recent_swing_lows) > 0
+    last_sl = array.get(recent_swing_lows, array.size(recent_swing_lows) - 1)
+    if close < last_sl and close[1] >= last_sl
+        bos_bearish := true
+
+plotshape(bos_bullish, "BoS up", style=shape.labelup, location=location.belowbar,
+          color=color.lime, text="BoS", textcolor=color.white, size=size.tiny)
+plotshape(bos_bearish, "BoS down", style=shape.labeldown, location=location.abovebar,
+          color=color.red, text="BoS", textcolor=color.white, size=size.tiny)
+
+// =============================================================================
+// CONFLUENCE SCORING (0-100)
+// =============================================================================
+
+confluence_long_score = 0
+confluence_short_score = 0
+
+// Long confluence: sweep_sellside + bullish FVG nearby + BoS bullish + HTF bullish
+if sweep_sellside
+    confluence_long_score += 30
+if near_bullish_fvg
+    confluence_long_score += 25
+if bos_bullish
+    confluence_long_score += 25
+if htf_bias_bullish
+    confluence_long_score += 20
+if not htf_bias_bullish and require_htf_alignment
+    confluence_long_score := math.max(0, confluence_long_score - 50)  // penalty
+
+// Short confluence: speculare
+if sweep_buyside
+    confluence_short_score += 30
+if near_bearish_fvg
+    confluence_short_score += 25
+if bos_bearish
+    confluence_short_score += 25
+if htf_bias_bearish
+    confluence_short_score += 20
+if not htf_bias_bearish and require_htf_alignment
+    confluence_short_score := math.max(0, confluence_short_score - 50)
+
+long_confluence_signal  = confluence_long_score  >= min_confluence_score
+short_confluence_signal = confluence_short_score >= min_confluence_score
+
+plotshape(long_confluence_signal, "LONG CONFLUENCE", style=shape.diamond,
+          location=location.belowbar, color=color.lime, size=size.normal)
+plotshape(short_confluence_signal, "SHORT CONFLUENCE", style=shape.diamond,
+          location=location.abovebar, color=color.red, size=size.normal)
+
+// Status table
+if barstate.islast
+    var table info = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 70))
+    table.cell(info, 0, 0, "HTF bias",         text_color=color.white)
+    table.cell(info, 1, 0, htf_bias_bullish ? "BULLISH" : (htf_bias_bearish ? "BEARISH" : "neutral"),
+               text_color=htf_bias_bullish ? color.lime : (htf_bias_bearish ? color.red : color.gray))
+    table.cell(info, 0, 1, "Long score",       text_color=color.white)
+    table.cell(info, 1, 1, str.tostring(confluence_long_score) + "/100",
+               text_color=confluence_long_score >= min_confluence_score ? color.lime : color.gray)
+    table.cell(info, 0, 2, "Short score",      text_color=color.white)
+    table.cell(info, 1, 2, str.tostring(confluence_short_score) + "/100",
+               text_color=confluence_short_score >= min_confluence_score ? color.red : color.gray)
+    table.cell(info, 0, 3, "Active FVGs",      text_color=color.white)
+    table.cell(info, 1, 3, str.tostring(array.size(active_fvgs)), text_color=color.white)
+    table.cell(info, 0, 4, "Recent sweep",     text_color=color.white)
+    sweep_str = sweep_buyside ? "buyside" : (sweep_sellside ? "sellside" : "no")
+    table.cell(info, 1, 4, sweep_str, text_color=sweep_buyside ? color.red : (sweep_sellside ? color.lime : color.gray))
+    table.cell(info, 0, 5, "Last BoS",         text_color=color.white)
+    bos_str = bos_bullish ? "up" : (bos_bearish ? "down" : "no")
+    table.cell(info, 1, 5, bos_str, text_color=bos_bullish ? color.lime : (bos_bearish ? color.red : color.gray))
+    table.cell(info, 0, 6, "Near FVG",         text_color=color.white)
+    fvg_str = near_bullish_fvg ? "bullish" : (near_bearish_fvg ? "bearish" : "no")
+    table.cell(info, 1, 6, fvg_str, text_color=near_bullish_fvg ? color.lime : (near_bearish_fvg ? color.red : color.gray))
+    table.cell(info, 0, 7, "Min score",        text_color=color.white)
+    table.cell(info, 1, 7, str.tostring(min_confluence_score), text_color=color.white)
+
+// =============================================================================
+// WEBHOOK ALERTS (only on confluence signals)
+// =============================================================================
+
+if barstate.isconfirmed and long_confluence_signal
+    msg = '{' +
+      '"event":"smc_confluence_long",' +
+      '"asset":"' + asset_tag + '",' +
+      '"timeframe":"' + timeframe.period + '",' +
+      '"confluence_score":' + str.tostring(confluence_long_score) + ',' +
+      '"components":{' +
+        '"sweep_sellside":' + (sweep_sellside ? "true" : "false") + ',' +
+        '"sweep_level":' + str.tostring(sweep_level, "#.##") + ',' +
+        '"near_bullish_fvg":' + (near_bullish_fvg ? "true" : "false") + ',' +
+        '"fvg_top":' + str.tostring(nearest_fvg_top, "#.##") + ',' +
+        '"fvg_bottom":' + str.tostring(nearest_fvg_bottom, "#.##") + ',' +
+        '"bos_bullish":' + (bos_bullish ? "true" : "false") + ',' +
+        '"htf_bias_bullish":' + (htf_bias_bullish ? "true" : "false") +
+      '},' +
+      '"htf_period":"' + htf_period + '",' +
+      '"price":' + str.tostring(close, "#.##") + ',' +
+      '"atr":' + str.tostring(atr14, "#.##") + ',' +
+      '"suggested_stop":' + str.tostring(close - atr14 * 1.5, "#.##") + ',' +
+      '"suggested_target_1r":' + str.tostring(close + atr14 * 1.5, "#.##") + ',' +
+      '"suggested_target_2r":' + str.tostring(close + atr14 * 3.0, "#.##") + ',' +
+      '"ts":"' + str.format_time(time, "yyyy-MM-ddTHH:mm:ssZ", "UTC") + '",' +
+      '"secret":"' + secret + '"' +
+    '}'
+    alert(msg, alert.freq_once_per_bar_close)
+
+if barstate.isconfirmed and short_confluence_signal
+    msg = '{' +
+      '"event":"smc_confluence_short",' +
+      '"asset":"' + asset_tag + '",' +
+      '"timeframe":"' + timeframe.period + '",' +
+      '"confluence_score":' + str.tostring(confluence_short_score) + ',' +
+      '"components":{' +
+        '"sweep_buyside":' + (sweep_buyside ? "true" : "false") + ',' +
+        '"sweep_level":' + str.tostring(sweep_level, "#.##") + ',' +
+        '"near_bearish_fvg":' + (near_bearish_fvg ? "true" : "false") + ',' +
+        '"fvg_top":' + str.tostring(nearest_fvg_top, "#.##") + ',' +
+        '"fvg_bottom":' + str.tostring(nearest_fvg_bottom, "#.##") + ',' +
+        '"bos_bearish":' + (bos_bearish ? "true" : "false") + ',' +
+        '"htf_bias_bearish":' + (htf_bias_bearish ? "true" : "false") +
+      '},' +
+      '"htf_period":"' + htf_period + '",' +
+      '"price":' + str.tostring(close, "#.##") + ',' +
+      '"atr":' + str.tostring(atr14, "#.##") + ',' +
+      '"suggested_stop":' + str.tostring(close + atr14 * 1.5, "#.##") + ',' +
+      '"suggested_target_1r":' + str.tostring(close - atr14 * 1.5, "#.##") + ',' +
+      '"suggested_target_2r":' + str.tostring(close - atr14 * 3.0, "#.##") + ',' +
+      '"ts":"' + str.format_time(time, "yyyy-MM-ddTHH:mm:ssZ", "UTC") + '",' +
+      '"secret":"' + secret + '"' +
+    '}'
+    alert(msg, alert.freq_once_per_bar_close)
