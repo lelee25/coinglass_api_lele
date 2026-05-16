@@ -164,6 +164,29 @@ Se asset == funding outlier:
 
 ---
 
+## CoinGecko tier requirement (validato empiricamente 2026-05-16)
+
+```
+✅ Le 7 lane FUNZIONANO su Demo:
+  - DISCOVERY: ricostruisci top_gainers da /coins/markets + sort client-side
+  - DOMINANCE: /global current + logging baseline 1-3 mesi
+  - MICRO: trending_pools + trades filter Demo OK
+  - HHI: client-side da /onchain/.../trades (no top_holders Analyst)
+  - Categories: 703 categorie Demo accessible
+  - public_treasury: Strategy/Tesla holdings Demo OK
+
+❌ Bottleneck reale = QUOTA mensile:
+  - Demo:    10k call/mese  → satura in ~25gg con scout 30min
+  - Basic:   100k call/mese → 10x headroom (sweet spot)
+  - Analyst: 500k + feature ufficiali + WebSocket
+```
+
+**Raccomandazione**: Demo finché si tiene, Basic $29/mo yearly quando satura
+regolarmente. Analyst solo se servono feature ufficiali (no client-side reconstruction)
+o WebSocket push. Vedi INTEGRATION-NOTES §25 per decision matrix completa.
+
+---
+
 ## Cross-reference con altre skill
 
 ```

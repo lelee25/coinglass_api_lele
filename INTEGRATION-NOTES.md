@@ -2623,3 +2623,127 @@ DEPENDENZE PYTHON DA INSTALLARE LATO SERVER:
 Il Claude server può iniziare l'implementazione senza buchi di data source.
 Tutti i test sono riproducibili in `tests/`. Il file [AGENT-ARCHITECTURE-GUIDE.md](AGENT-ARCHITECTURE-GUIDE.md)
 è la mappa architetturale finale.
+
+---
+
+## 25. CoinGecko upgrade decision matrix (2026-05-16)
+
+> Sezione che chiude il dibattito su quale piano CoinGecko serve realmente
+> al sistema gex-agentkit. Basata su smoke test esaustivo con chiave Demo
+> fresca (vedi [cg_report_v3_analyst_validation.md](cg_report_v3_analyst_validation.md)).
+
+### 25.1. Le 5 skill che usano CoinGecko
+
+| Skill | Dipendenza CG | Tier minimo richiesto |
+|---|---|---|
+| `proactive-scout` (7 lane) | massiccia | **Demo OK** per tutte 7 lane (caveat quota) |
+| `whale-onchain-monitor` | HHI via `/onchain/.../trades` filter | **Demo OK** (HHI client-side da trades) |
+| `narrative-rotation-monitor` | `/coins/categories` + `/coins/markets?category=` | **Demo OK** (700+ categories accessibili) |
+| `etf-flow-interpreter` | `/companies/public_treasury` + `/public_treasury/{entity}` | **Demo OK** (treasury current state) |
+| `macro-regime-monitor` | `/global` + `/exchange_rates` | **Demo OK** pieno |
+
+**Le 11 skill rimanenti NON dipendono da CoinGecko** — coperte da CoinGlass + Coinalyze + WS + investpy + RSS.
+
+### 25.2. Verità empirica delle 7 lane scout (smoke 2026-05-16)
+
+```
+✅ MAJOR             — Hyperliquid + Coinalyze + RSS (no CG)
+✅ EMERGING          — Hyperliquid + Perplexity + Coinalyze (no CG)
+✅ DISCOVERY         — /coins/markets?per_page=250 Demo + sort client-side
+✅ MICRO             — /onchain/{net}/trending_pools + /trades Demo
+✅ ALPHA             — HL whitelist + Coinalyze + CoinGlass (no CG)
+✅ REBOUND           — /coins/markets drawdown 30d Demo
+✅ DOMINANCE         — /global Demo + logging proprio per baseline
+✅ MACRO WARNINGS    — /companies/public_treasury Demo
+✅ FLOW ROTATION     — /exchanges/{id}/volume_chart Demo (snapshot, no range)
+```
+
+**Tutte le 7 lane operative su Demo.** Le feature Analyst (`top_gainers_losers`, `market_cap_chart` history, `top_holders/holders_chart` ufficiali) sono COMODE ma non NECESSARIE per il funzionamento delle lane.
+
+### 25.3. Il problema reale: quota mensile
+
+```
+Stima call/mese realistica (cron scout 30min):
+  - markets top 250 (1h): 720
+  - categories (4h): 180
+  - markets by category 5x (4h): 900
+  - global (1h): 720
+  - public_treasury (4h): 180
+  - trending_pools 6 chain × 1 dur × 30min: 8.640
+  - pool trades 3 flag × 30min: 4.320
+                          TOTAL: ~15.660 call/mese
+
+Demo quota:    10.000  → saturazione ~25gg/mese ❌
+Basic quota:  100.000  → 10x headroom ✅
+Analyst:      500.000  → 50x ✅
+```
+
+### 25.4. Decision matrix
+
+| Scenario | Tier | Costo yearly | Razionale |
+|---|---|---|---|
+| Sistema dev/experimental, quota OK con cache aggressiva | **Demo** | €0 | Cache 1h+, ridurre chain coverage 6→3 |
+| **Sistema produzione + 7 lane operative + quota saturation** | **Basic $29 yearly** | **€324/anno** | Sweet spot: quota 100k risolve issue, feature stesse di Demo |
+| Sistema produzione + voglia WebSocket + feature ufficiali pulite | Analyst $103 yearly | €1.150/anno | Sblocca top_gainers ufficiale, history 10y, WebSocket push |
+| Multi-asset enterprise multi-strategy | Lite $399 yearly | €4.500/anno | Solo se 5+ asset multi-strategy real-time |
+
+### 25.5. Raccomandazione operativa per gex-agentkit
+
+**Sweet spot: Basic $29/mo yearly ($35/mo monthly)**
+
+Razionale:
+1. Demo è **borderline** sul quota (~70-80% utilizzo mensile) — saturazione in produzione
+2. Basic risolve il quota issue (10x headroom) **senza pagare per feature non necessarie**
+3. Le 7 lane sono già OPERATIVE su Demo a livello di feature — Analyst non sblocca nulla di critico
+4. Costo incrementale: €27/mese vs €0 Demo, vs €95/mese Analyst
+
+Upgrade Analyst SOLO se in futuro:
+- WebSocket push diventa critico (latency dei polling cron 30min insufficiente)
+- Vuoi eliminare ricostruzioni client-side (HHI, top_gainers, ecc.)
+- Aggiungi skill che richiedono 10y history (backtest scout, regime detection long-term)
+
+### 25.6. Per il Claude server
+
+Quando implementi le 5 skill che usano CoinGecko:
+1. **Assumi Demo** come baseline default
+2. **Implementa client-side reconstruction** per features Analyst-gated:
+   - top_gainers: ordina `/coins/markets` per `price_change_percentage_24h_in_currency`
+   - HHI: calcola da `/onchain/.../trades?trade_volume_in_usd_greater_than=1000`
+   - DOMINANCE baseline: logga snapshot `/global` orari in DB locale
+3. **Cache aggressive**: TTL 1h su markets top 250, 4h su categories, 30min su trending pools
+4. **Detect quota saturation**: monitor HTTP 429 + error_code 10006, alert utente
+5. **Documento upgrade trigger**: se quota saturation > 2 volte/mese → suggerisci Basic; se feature client-side reconstruction prende > 30% dev time → suggerisci Analyst
+
+### 25.7. Endpoint Demo-accessibili (validati 2026-05-16, 37 probe)
+
+Vedi report completo: [cg_report_v3_analyst_validation.md](cg_report_v3_analyst_validation.md)
+
+Highlights:
+- ✅ `/coins/categories` → 703 categories con momentum_24h (382k bytes)
+- ✅ `/coins/markets?category=ai|defi|rwa-rwa|...` → top picks per categoria
+- ✅ `/onchain/networks/{net}/trending_pools?duration={1h,6h,24h}` → 20 pool per duration
+- ✅ `/onchain/networks/{net}/pools/{addr}/trades?trade_volume_in_usd_greater_than=1000` → 300 trade filtered (225k bytes)
+- ✅ `/onchain/tokens/info_recently_updated?network=eth` → 115k bytes recent tokens
+- ✅ `/companies/public_treasury/bitcoin` → 34k bytes Strategy/Tesla holdings
+- ✅ `/public_treasury/tesla/transaction_history` → SEC-sourced
+
+### 25.8. Endpoint definitivamente gated (validati 2026-05-16)
+
+Pro+ (Basic, Analyst, Lite, Enterprise):
+- `/coins/top_gainers_losers` (qualsiasi duration)
+- `/coins/list/new`
+- `/global/market_cap_chart`
+- `/exchanges/{id}/volume_chart/range`
+- `/coins/{id}/ohlc/range`
+- `/key`, `/news`
+
+Analyst+ exclusive (Analyst, Lite, Enterprise):
+- `/onchain/pools/megafilter` (con/senza checks)
+- `/onchain/networks/{net}/tokens/{addr}/top_holders`
+- `/onchain/networks/{net}/tokens/{addr}/holders_chart`
+- `/onchain/networks/{net}/tokens/{addr}/top_traders`
+- `/onchain/categories` + `/categories/{id}/pools`
+
+Enterprise only:
+- `/coins/{id}/total_supply_chart`
+- `/coins/{id}/circulating_supply_chart`
